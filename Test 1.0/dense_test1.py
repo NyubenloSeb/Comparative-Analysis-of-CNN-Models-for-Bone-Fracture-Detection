@@ -1,0 +1,145 @@
+# Import necessary libraries
+import matplotlib.pyplot as plt
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import DenseNet121
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.regularizers import l2
+from sklearn.metrics import confusion_matrix, classification_report
+import numpy as np
+
+# Define paths to dataset directories
+train_dir = r'F:\Bone Frature Project\Test 1.0\dataset\train'
+val_dir = r'F:\Bone Frature Project\Test 1.0\dataset\val'
+test_dir = r'F:\Bone Frature Project\Test 1.0\dataset\testing'
+
+# Step 1: Preprocess the Data using ImageDataGenerator
+train_datagen = ImageDataGenerator(rescale=1./255)
+
+# For validation and test sets, we only rescale images
+val_datagen = ImageDataGenerator(rescale=1./255)
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+# Load training, validation, and test data with one-hot encoding
+train_generator = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=(224, 224),
+    batch_size=12,
+    class_mode='categorical',  # Changed to 'categorical' for one-hot encoding
+    shuffle=True
+)
+
+validation_generator = val_datagen.flow_from_directory(
+    val_dir,
+    target_size=(224, 224),
+    batch_size=12,
+    class_mode='categorical'
+)
+
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(224, 224),
+    batch_size=2,
+    class_mode='categorical',
+    shuffle=False
+)
+
+# Step 2: Create the Model using Transfer Learning (DenseNet121)
+base_model = DenseNet121(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+
+# Add custom layers with L2 regularization
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(1024, activation='relu', kernel_regularizer=l2(0.01))(x)  # L2 regularization
+x = Dropout(.5)(x)
+predictions = Dense(2, activation='softmax')(x)  # Changed to 2 units with 'softmax'
+
+# Combine the base model with the new custom layers
+model = Model(inputs=base_model.input, outputs=predictions)
+
+# Freeze the layers of the pre-trained base model
+for layer in base_model.layers:
+    layer.trainable = False
+
+# Compile the model for categorical cross-entropy loss
+model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+model.summary()
+
+# Step 3: Define Callbacks
+callbacks = [
+    ModelCheckpoint('densenet121_bone_fracture_best.keras', save_best_only=True, monitor='val_loss', mode='min')
+
+]
+
+# Step 4: Train the Model
+history = model.fit(
+    train_generator,
+    validation_data=validation_generator,
+    epochs=50,
+    callbacks=callbacks
+)
+
+# Step 5: Fine-Tune the Model with a Lower Learning Rate
+for layer in base_model.layers[-10:]:  # Unfreeze fewer layers for fine-tuning
+    layer.trainable = True
+
+# Recompile the model with a lower learning rate for fine-tuning
+model.compile(optimizer=Adam(learning_rate=1e-5), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Fine-tune the model
+history_finetune = model.fit(
+    train_generator,
+    validation_data=validation_generator,
+    epochs=10,
+    callbacks=callbacks
+)
+
+# Step 6: Plot Training and Validation Accuracy and Loss
+def plot_training(history, history_finetune):
+    acc = history.history['accuracy'] + history_finetune.history['accuracy']
+    val_acc = history.history['val_accuracy'] + history_finetune.history['val_accuracy']
+    loss = history.history['loss'] + history_finetune.history['loss']
+    val_loss = history.history['val_loss'] + history_finetune.history['val_loss']
+
+    epochs = range(1, len(acc) + 1)
+
+    # Plot Accuracy
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, acc, 'b', label='Training Accuracy')
+    plt.plot(epochs, val_acc, 'r', label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+
+    # Plot Loss
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, loss, 'b', label='Training Loss')
+    plt.plot(epochs, val_loss, 'r', label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+
+    plt.show()
+
+plot_training(history, history_finetune)
+
+# Step 7: Evaluate the Model on the Test Set
+test_steps = (test_generator.samples + test_generator.batch_size - 1) // test_generator.batch_size
+test_loss, test_accuracy = model.evaluate(test_generator, steps=test_steps)
+print(f'Test accuracy: {test_accuracy:.4f}')
+
+# Step 8: Make Predictions on Test Data
+y_pred = model.predict(test_generator, steps=test_steps)
+y_pred_classes = np.argmax(y_pred, axis=1)
+
+# Generate confusion matrix
+y_true = test_generator.classes
+cm = confusion_matrix(y_true, y_pred_classes)
+print('Confusion Matrix:')
+print(cm)
+
+# Generate classification report
+cr = classification_report(y_true, y_pred_classes, target_names=['Not Fractured', 'Fractured'])
+print('Classification Report:')
+print(cr)
